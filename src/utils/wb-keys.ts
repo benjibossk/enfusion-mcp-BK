@@ -132,8 +132,46 @@ public class EmcpDlg {
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+  [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, E cb, IntPtr p);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   const uint WM_COMMAND = 0x0111;
   const int IDIGNORE = 5;
+  const int IDNO = 7;
+  static string Text(IntPtr h) {
+    int len = GetWindowTextLength(h);
+    if (len == 0) return "";
+    StringBuilder sb = new StringBuilder(len + 1);
+    GetWindowText(h, sb, sb.Capacity);
+    return sb.ToString();
+  }
+  static bool IsWorkbench(IntPtr h) {
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    try { return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.StartsWith("ArmaReforgerWorkbench"); }
+    catch { return false; }
+  }
+  // "Save changes?" Yes/No(/Cancel) message box raised by the Workbench on world/script reload:
+  // answer No. Returns the dialog text of each one answered.
+  public static System.Collections.Generic.List<string> DiscardSave() {
+    var done = new System.Collections.Generic.List<string>();
+    EnumWindows(delegate(IntPtr h, IntPtr l) {
+      if (!IsWindowVisible(h)) return true;
+      StringBuilder cls = new StringBuilder(64);
+      GetClassName(h, cls, cls.Capacity);
+      if (cls.ToString() != "#32770" || GetDlgItem(h, IDNO) == IntPtr.Zero || !IsWorkbench(h)) return true;
+      StringBuilder body = new StringBuilder(Text(h));
+      EnumChildWindows(h, delegate(IntPtr c, IntPtr q) { body.Append(" ").Append(Text(c)); return true; }, IntPtr.Zero);
+      string t = body.ToString().ToLowerInvariant();
+      if (t.Contains("save") || t.Contains("sauvegard") || t.Contains("modif") || t.Contains("changes")) {
+        PostMessage(h, WM_COMMAND, new IntPtr(IDNO), IntPtr.Zero);
+        done.Add(body.ToString().Replace("", " ").Replace("
+", " "));
+      }
+      return true;
+    }, IntPtr.Zero);
+    return done;
+  }
   public static int DismissAll(string title) {
     int n = 0;
     EnumWindows(delegate(IntPtr h, IntPtr l) {
@@ -156,6 +194,7 @@ $deadline = (Get-Date).AddMilliseconds(__DURATION__)
 while ((Get-Date) -lt $deadline) {
   $n = [EmcpDlg]::DismissAll('Enfusion engine')
   if ($n -gt 0) { Write-Output "DISMISSED $n" }
+  if (__DISCARD__) { foreach ($t in [EmcpDlg]::DiscardSave()) { Write-Output "DISCARDED $t" } }
   Start-Sleep -Milliseconds 400
 }
 `;
@@ -163,10 +202,20 @@ while ((Get-Date) -lt $deadline) {
 export interface AssertionDismisser {
   /** Stop watching and report how many assertion boxes were auto-ignored. */
   stop(): Promise<number>;
+  /** Texts of the "save changes?" dialogs answered No so far. */
+  discardedSaves(): string[];
 }
 
-export function startAssertionDismisser(durationMs: number): AssertionDismisser {
-  const script = PS_DISMISS_LOOP.replace("__DURATION__", String(Math.ceil(durationMs)));
+/**
+ * @param discardSavePrompts also answer No to the Workbench "save changes?" box. Only safe when
+ *   the caller saves its own editor changes (wb_save) and edits world files on disk directly.
+ */
+export function startAssertionDismisser(durationMs: number, discardSavePrompts = false): AssertionDismisser {
+  const script = PS_DISMISS_LOOP.replace("__DURATION__", String(Math.ceil(durationMs))).replace(
+    "__DISCARD__",
+    discardSavePrompts ? "$true" : "$false"
+  );
+  const discarded: string[] = [];
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   let dismissed = 0;
   const proc = spawn(
@@ -178,11 +227,15 @@ export function startAssertionDismisser(durationMs: number): AssertionDismisser 
     for (const m of chunk.toString().matchAll(/DISMISSED (\d+)/g)) {
       dismissed += parseInt(m[1], 10);
     }
+    for (const m of chunk.toString().matchAll(/DISCARDED (.*)/g)) {
+      discarded.push(m[1].trim());
+    }
   });
   proc.on("error", () => {
     /* watcher is best-effort; a failure must not break the compile */
   });
   return {
+    discardedSaves: () => discarded,
     stop(): Promise<number> {
       return new Promise((resolve) => {
         if (proc.exitCode !== null || proc.killed) return resolve(dismissed);

@@ -76,6 +76,13 @@ export function registerWbCompile(server: McpServer): void {
             "Auto-click Ignore on the engine's 'Resources are leaking!' assertion box, which " +
               "otherwise blocks the reload until a human dismisses it. Set false to see it yourself."
           ),
+        discardSavePrompt: z
+          .boolean()
+          .default(true)
+          .describe(
+            "Auto-answer No to the Workbench 'save changes?' box that blocks the reload. Editor " +
+              "changes made through the MCP must be saved with wb_save beforehand."
+          ),
         trigger: z
           .enum(["auto", "netapi", "keyboard"])
           .default("auto")
@@ -87,7 +94,7 @@ export function registerWbCompile(server: McpServer): void {
           ),
       },
     },
-    async ({ timeoutMs, warningPathFilter, maxErrors, autoDismissAssertions, trigger }) => {
+    async ({ timeoutMs, warningPathFilter, maxErrors, autoDismissAssertions, discardSavePrompt, trigger }) => {
       const fail = (text: string) => ({
         content: [{ type: "text" as const, text }],
         isError: true,
@@ -117,8 +124,8 @@ export function registerWbCompile(server: McpServer): void {
       }
 
       // Start watching before the keystroke: the assertion can fire early in teardown.
-      const dismisser = autoDismissAssertions
-        ? startAssertionDismisser(timeoutMs + 10_000)
+      const dismisser = autoDismissAssertions || discardSavePrompt
+        ? startAssertionDismisser(timeoutMs + 10_000, discardSavePrompt)
         : null;
       const stopDismisser = async (): Promise<number> => (dismisser ? dismisser.stop() : 0);
 
