@@ -8,7 +8,10 @@ export function registerWbReload(server: McpServer, client: WorkbenchClient): vo
     "wb_reload",
     {
       description:
-        "Reload scripts or plugins in the Workbench. Use after editing .c script files or Workbench plugins to pick up changes without restarting.",
+        "Fire-and-forget script/plugin reload. PREFER wb_compile for .c edits: this tool reports " +
+        "nothing about whether the code compiled, and triggering the reload from inside the script " +
+        "VM makes the engine pop an 'Assertion failed — Resources are leaking!' modal the user must " +
+        "dismiss by hand. Only use this when you deliberately do not want a result.",
       inputSchema: {
         target: z
           .enum(["scripts", "plugins", "both"])
