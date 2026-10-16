@@ -163,9 +163,19 @@ public class EmcpDlg {
       StringBuilder body = new StringBuilder(Text(h));
       EnumChildWindows(h, delegate(IntPtr c, IntPtr q) { body.Append(" ").Append(Text(c)); return true; }, IntPtr.Zero);
       string t = body.ToString().ToLowerInvariant();
+      // "This file has been modified by another program. Do you want to reload it?" (Script Editor):
+      // the file on disk is the one just written by the tools -> Yes, never keep the stale buffer
+      if (t.Contains("another program") || t.Contains("reload it")) {
+        PostMessage(h, WM_COMMAND, new IntPtr(6), IntPtr.Zero); // IDYES
+        done.Add("RELOADED " + body.ToString().Replace("
+", " ").Replace("
+", " "));
+        return true;
+      }
       if (t.Contains("save") || t.Contains("sauvegard") || t.Contains("modif") || t.Contains("changes")) {
         PostMessage(h, WM_COMMAND, new IntPtr(IDNO), IntPtr.Zero);
-        done.Add(body.ToString().Replace("", " ").Replace("
+        done.Add(body.ToString().Replace("
+", " ").Replace("
 ", " "));
       }
       return true;
@@ -238,15 +248,20 @@ export function startAssertionDismisser(durationMs: number, discardSavePrompts =
     discardedSaves: () => discarded,
     stop(): Promise<number> {
       return new Promise((resolve) => {
-        if (proc.exitCode !== null || proc.killed) return resolve(dismissed);
-        proc.once("close", () => resolve(dismissed));
-        try {
-          proc.kill();
-        } catch {
-          resolve(dismissed);
+        // The "Resources are leaking!" box often pops a few seconds AFTER the compile verdict (when the
+        // NET API handler's response is torn down): keep watching for another minute in the
+        // background instead of killing the watcher now, so it never stays on screen blocking the next call.
+        if (proc.exitCode === null && !proc.killed) {
+          const t = setTimeout(() => {
+            try {
+              proc.kill();
+            } catch {
+              /* already gone */
+            }
+          }, 60_000);
+          t.unref();
         }
-        // Never hang the tool on a stubborn watcher.
-        setTimeout(() => resolve(dismissed), 2000);
+        resolve(dismissed);
       });
     },
   };
