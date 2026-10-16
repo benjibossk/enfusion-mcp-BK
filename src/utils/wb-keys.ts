@@ -167,16 +167,12 @@ public class EmcpDlg {
       // the file on disk is the one just written by the tools -> Yes, never keep the stale buffer
       if (t.Contains("another program") || t.Contains("reload it")) {
         PostMessage(h, WM_COMMAND, new IntPtr(6), IntPtr.Zero); // IDYES
-        done.Add("RELOADED " + body.ToString().Replace("
-", " ").Replace("
-", " "));
+        done.Add("RELOADED file");
         return true;
       }
       if (t.Contains("save") || t.Contains("sauvegard") || t.Contains("modif") || t.Contains("changes")) {
         PostMessage(h, WM_COMMAND, new IntPtr(IDNO), IntPtr.Zero);
-        done.Add(body.ToString().Replace("
-", " ").Replace("
-", " "));
+        done.Add(body.ToString().Replace((char)13, (char)32).Replace((char)10, (char)32));
       }
       return true;
     }, IntPtr.Zero);
