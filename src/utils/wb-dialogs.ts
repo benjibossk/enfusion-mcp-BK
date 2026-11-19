@@ -17,6 +17,24 @@ import { minimalEnv } from "./wb-env.js";
 
 export type SavePromptMode = "save" | "discard" | "leave";
 
+const SAVE_PROMPT_MODES: readonly string[] = ["save", "discard", "leave"];
+
+/**
+ * Values spliced into the PowerShell scripts must never carry caller-controlled text.
+ * Zod already restricts the tool args, but re-check here so a future caller cannot inject.
+ */
+export function safeSavePromptMode(mode: unknown): SavePromptMode {
+  if (typeof mode === "string" && SAVE_PROMPT_MODES.includes(mode)) return mode as SavePromptMode;
+  throw new Error(`Invalid savePrompt mode: ${String(mode)}`);
+}
+
+/** Non-negative integer milliseconds, safe to splice into a script. */
+export function safeMs(ms: unknown): number {
+  const n = Number(ms);
+  if (!Number.isFinite(n) || n < 0) return 0;
+  return Math.min(Math.ceil(n), 3_600_000);
+}
+
 export interface DialogReport {
   title: string;
   text: string;
@@ -154,9 +172,9 @@ export interface DialogWatcher {
  * deadline; `stop()` ends it early (it only kills our own PowerShell scanner, never the Workbench).
  */
 export function startDialogWatcher(savePrompt: SavePromptMode, watchMs: number): DialogWatcher {
-  const script = PS_DIALOG_SCAN.replace("__WATCH__", String(Math.max(0, Math.ceil(watchMs)))).replace(
+  const script = PS_DIALOG_SCAN.replace("__WATCH__", String(safeMs(watchMs))).replace(
     "__MODE__",
-    savePrompt
+    safeSavePromptMode(savePrompt)
   );
   const encoded = Buffer.from(script, "utf16le").toString("base64");
   const reports: DialogReport[] = [];

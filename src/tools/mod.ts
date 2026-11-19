@@ -673,6 +673,13 @@ export function registerMod(
 
         const addonDir = resolve(basePath, name);
         const classPrefix = prefix ?? derivePrefix(name);
+        // The prefix ends up in file names (Scripts/Game/<PREFIX>X.c): no separators or dots.
+        if (prefix !== undefined && !/^[A-Za-z0-9_]+$/.test(prefix)) {
+          return {
+            content: [{ type: "text", text: "Invalid prefix: letters, digits and underscores only." }],
+            isError: true,
+          };
+        }
 
         if (existsSync(addonDir)) {
           return {

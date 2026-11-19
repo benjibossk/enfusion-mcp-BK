@@ -13,6 +13,7 @@
  */
 
 import { execFile, spawn } from "node:child_process";
+import { safeMs, safeSavePromptMode } from "./wb-dialogs.js";
 import { minimalEnv } from "./wb-env.js";
 
 const SCRIPT_EDITOR_TITLE_PREFIX = "Script Editor";
@@ -245,9 +246,9 @@ export function startAssertionDismisser(
   durationMs: number,
   savePrompt: "save" | "discard" | "leave" = "leave"
 ): AssertionDismisser {
-  const script = PS_DISMISS_LOOP.replace("__DURATION__", String(Math.ceil(durationMs))).replace(
+  const script = PS_DISMISS_LOOP.replace("__DURATION__", String(safeMs(durationMs))).replace(
     /__SAVEMODE__/g,
-    savePrompt
+    safeSavePromptMode(savePrompt)
   );
   const discarded: string[] = [];
   const encoded = Buffer.from(script, "utf16le").toString("base64");
