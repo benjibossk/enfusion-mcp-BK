@@ -58,6 +58,11 @@ public class EmcpScan {
     try { return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.StartsWith("ArmaReforgerWorkbench"); }
     catch { return false; }
   }
+  static bool IsCrashReporter(IntPtr h) {
+    uint pid; GetWindowThreadProcessId(h, out pid);
+    try { return System.Diagnostics.Process.GetProcessById((int)pid).ProcessName.StartsWith("CrashReporter"); }
+    catch { return false; }
+  }
   static int Find(List<string> labels, List<int> ids, string[] wanted) {
     for (int i = 0; i < labels.Count; i++) {
       string l = labels[i].ToLowerInvariant();
@@ -73,7 +78,18 @@ public class EmcpScan {
   public static List<string> Scan(string mode, HashSet<long> seen) {
     var outp = new List<string>();
     EnumWindows(delegate(IntPtr h, IntPtr l) {
-      if (!IsWindowVisible(h) || Cls(h) != "#32770" || !IsWorkbench(h)) return true;
+      if (!IsWindowVisible(h)) return true;
+      // Benji asked (2026-11-19) to close the crash reporter too: it keeps the NET API port 5775 after a crash.
+      // Closed with WM_CLOSE only: the report is never sent (no Send click), the process is never killed.
+      if (IsCrashReporter(h)) {
+        long ck = h.ToInt64();
+        if (seen.Contains(ck)) return true;
+        seen.Add(ck);
+        PostMessage(h, 0x0010, IntPtr.Zero, IntPtr.Zero); // WM_CLOSE
+        outp.Add("{\\"title\\":\\"" + Esc(Text(h)) + "\\",\\"text\\":\\"\\",\\"buttons\\":[],\\"kind\\":\\"crash_reporter\\",\\"clicked\\":\\"WM_CLOSE\\"}");
+        return true;
+      }
+      if (Cls(h) != "#32770" || !IsWorkbench(h)) return true;
       string title = Text(h);
       var labels = new List<string>(); var ids = new List<int>(); var body = new StringBuilder();
       EnumChildWindows(h, delegate(IntPtr c, IntPtr q) {
