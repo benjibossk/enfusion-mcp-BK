@@ -1,6 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { WorkbenchClient } from "../workbench/client.js";
+import { withDialogDismissal, dismissDialogs, formatDialogReports } from "../utils/wb-dialogs.js";
 import { formatConnectionStatus, requireEditMode, requirePlayMode } from "../workbench/status.js";
 
 export function registerWbEditorTools(server: McpServer, client: WorkbenchClient): void {
@@ -98,9 +99,14 @@ export function registerWbEditorTools(server: McpServer, client: WorkbenchClient
           .string()
           .optional()
           .describe("File path for Save As. Omit to save to the current file."),
+        savePrompt: z
+          .enum(["save", "discard", "leave"])
+          .default("save")
+          .describe("How to answer a 'save changes?' box raised during the call (default save)."),
       },
     },
-    async ({ path }) => {
+    async ({ path, savePrompt }) => {
+      let dlg = "";
       const modeErr = requireEditMode(client, "save");
       if (modeErr) {
         return { content: [{ type: "text" as const, text: modeErr + formatConnectionStatus(client) }] };
@@ -112,11 +118,14 @@ export function registerWbEditorTools(server: McpServer, client: WorkbenchClient
         if (path) params.path = path;
 
         // Save can open a modal dialog for unsaved worlds — use longer timeout
-        const result = await client.call<Record<string, unknown>>(
-          "EMCP_WB_EditorControl",
-          params,
-          { timeout: 30_000 }
+        const run = await withDialogDismissal(
+          () => client.call<Record<string, unknown>>("EMCP_WB_EditorControl", params, { timeout: 30_000 }),
+          savePrompt,
+          35_000
         );
+        dlg = formatDialogReports(run.dialogs);
+        if (run.error) throw run.error;
+        const result = run.result as Record<string, unknown>;
 
         const label = path ? `Saved as: ${path}` : "World saved.";
         return {
@@ -134,13 +143,13 @@ export function registerWbEditorTools(server: McpServer, client: WorkbenchClient
             content: [
               {
                 type: "text" as const,
-                text: `**Save Pending** — Workbench opened a save dialog that requires user confirmation. The world will be saved once the user clicks OK in Workbench. This is normal for worlds that haven't been saved before.${formatConnectionStatus(client)}`,
+                text: `**Save Pending** — Workbench opened a save dialog that requires user confirmation. The world will be saved once the user clicks OK in Workbench. This is normal for worlds that haven't been saved before.${dlg}${formatConnectionStatus(client)}`,
               },
             ],
           };
         }
         return {
-          content: [{ type: "text" as const, text: `Error saving: ${msg}${formatConnectionStatus(client)}` }],
+          content: [{ type: "text" as const, text: `Error saving: ${msg}${dlg}${formatConnectionStatus(client)}` }],
         isError: true,
         };
       }
@@ -193,14 +202,23 @@ export function registerWbEditorTools(server: McpServer, client: WorkbenchClient
         path: z
           .string()
           .describe("Resource path to open (e.g., 'Prefabs/Weapons/AK47.et', 'Scripts/Game/MyScript.c')"),
+        savePrompt: z
+          .enum(["save", "discard", "leave"])
+          .default("save")
+          .describe("How to answer a 'save changes?' box raised when switching resource (default save)."),
       },
     },
-    async ({ path }) => {
+    async ({ path, savePrompt }) => {
+      let dlg = "";
       try {
-        const result = await client.call<Record<string, unknown>>("EMCP_WB_EditorControl", {
-          action: "openResource",
-          path,
-        });
+        const run = await withDialogDismissal(
+          () => client.call<Record<string, unknown>>("EMCP_WB_EditorControl", { action: "openResource", path }),
+          savePrompt,
+          35_000
+        );
+        dlg = formatDialogReports(run.dialogs);
+        if (run.error) throw run.error;
+        const result = run.result as Record<string, unknown>;
 
         return {
           content: [
@@ -213,10 +231,39 @@ export function registerWbEditorTools(server: McpServer, client: WorkbenchClient
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         return {
-          content: [{ type: "text" as const, text: `Error opening resource: ${msg}${formatConnectionStatus(client)}` }],
+          content: [{ type: "text" as const, text: `Error opening resource: ${msg}${dlg}${formatConnectionStatus(client)}` }],
         isError: true,
         };
       }
+    }
+  );
+  // wb_dismiss_dialogs — handle the Workbench's modal message boxes so it can run unattended
+  server.registerTool(
+    "wb_dismiss_dialogs",
+    {
+      description:
+        "Scan the Workbench process's top-level modal dialogs and handle them: save prompts per savePrompt " +
+        "(default save), engine assertion / 'Resources are leaking!' boxes -> Ignore, single OK/Close message " +
+        "boxes -> click, anything else left open. Reports title, text and button clicked for every dialog. " +
+        "Does not need the NET API (works while it is blocked by a modal). Never touches crash reporters, never kills processes.",
+      inputSchema: {
+        savePrompt: z.enum(["save", "discard", "leave"]).default("save").describe("Answer to 'save changes?' boxes."),
+        watchMs: z
+          .number()
+          .int()
+          .min(0)
+          .max(600_000)
+          .default(0)
+          .describe("0 = single scan; otherwise keep scanning every 500 ms for this long."),
+      },
+    },
+    async ({ savePrompt, watchMs }) => {
+      const dialogs = await dismissDialogs(savePrompt, watchMs);
+      const text = dialogs.length
+        ? `**wb_dismiss_dialogs** — ${dialogs.length} dialog(s), ${dialogs.filter((d) => d.clicked).length} handled.` +
+          formatDialogReports(dialogs)
+        : "**wb_dismiss_dialogs** — no Workbench dialog found.";
+      return { content: [{ type: "text" as const, text }] };
     }
   );
 }

@@ -134,6 +134,7 @@ public class EmcpDlg {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint msg, IntPtr w, IntPtr l);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern IntPtr GetDlgItem(IntPtr h, int id);
+  [DllImport("user32.dll")] public static extern int GetDlgCtrlID(IntPtr h);
   [DllImport("user32.dll")] public static extern bool EnumChildWindows(IntPtr h, E cb, IntPtr p);
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   const uint WM_COMMAND = 0x0111;
@@ -153,7 +154,7 @@ public class EmcpDlg {
   }
   // "Save changes?" Yes/No(/Cancel) message box raised by the Workbench on world/script reload:
   // answer No. Returns the dialog text of each one answered.
-  public static System.Collections.Generic.List<string> DiscardSave() {
+  public static System.Collections.Generic.List<string> DiscardSave(string mode) {
     var done = new System.Collections.Generic.List<string>();
     EnumWindows(delegate(IntPtr h, IntPtr l) {
       if (!IsWindowVisible(h)) return true;
@@ -170,9 +171,19 @@ public class EmcpDlg {
         done.Add("RELOADED file");
         return true;
       }
-      if (t.Contains("save") || t.Contains("sauvegard") || t.Contains("modif") || t.Contains("changes")) {
-        PostMessage(h, WM_COMMAND, new IntPtr(IDNO), IntPtr.Zero);
-        done.Add(body.ToString().Replace((char)13, (char)32).Replace((char)10, (char)32));
+      if (t.Contains("save") || t.Contains("enregistr") || t.Contains("sauvegard") || t.Contains("modif") || t.Contains("changes")) {
+        // savePrompt "save" -> Yes/Oui/Save/Enregistrer, "discard" -> No/Non/Don't save/Ne pas enregistrer
+        string[] want = mode == "save"
+          ? new string[] { "yes", "oui", "save", "enregistrer", "sauvegarder" }
+          : new string[] { "no", "non", "don't save", "dont save", "do not save", "ne pas enregistrer", "ne pas sauvegarder" };
+        int id = mode == "save" ? 6 : IDNO;
+        EnumChildWindows(h, delegate(IntPtr c, IntPtr q) {
+          string bt = Text(c).Replace("&", "").Trim().ToLowerInvariant();
+          foreach (string w in want) if (bt == w) { id = GetDlgCtrlID(c); return false; }
+          return true;
+        }, IntPtr.Zero);
+        PostMessage(h, WM_COMMAND, new IntPtr(id), IntPtr.Zero);
+        done.Add((mode == "save" ? "SAVED: " : "DISCARDED: ") + body.ToString().Replace((char)13, (char)32).Replace((char)10, (char)32));
       }
       return true;
     }, IntPtr.Zero);
@@ -196,11 +207,25 @@ public class EmcpDlg {
   }
 }
 "@
+Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+$uia = [System.Windows.Automation.AutomationElement]
+$tree = [System.Windows.Automation.TreeScope]
+$nameP = $uia::NameProperty
+# Workbench "Reload world - Do you want to save changes?" (a Qt window, not a Win32 message box):
+# answer Yes so the world reload goes on with the user's edits saved
+function Accept-ReloadWorld {
+  $w = $uia::RootElement.FindFirst($tree::Children, (New-Object System.Windows.Automation.PropertyCondition($nameP, 'Reload world')))
+  if (-not $w) { return $false }
+  $b = $w.FindFirst($tree::Descendants, (New-Object System.Windows.Automation.PropertyCondition($nameP, 'Yes')))
+  if (-not $b) { return $false }
+  try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $true } catch { return $false }
+}
 $deadline = (Get-Date).AddMilliseconds(__DURATION__)
 while ((Get-Date) -lt $deadline) {
   $n = [EmcpDlg]::DismissAll('Enfusion engine')
   if ($n -gt 0) { Write-Output "DISMISSED $n" }
-  if (__DISCARD__) { foreach ($t in [EmcpDlg]::DiscardSave()) { Write-Output "DISCARDED $t" } }
+  try { if (Accept-ReloadWorld) { Write-Output "RELOADWORLD yes" } } catch { }
+  if ('__SAVEMODE__' -ne 'leave') { foreach ($t in [EmcpDlg]::DiscardSave('__SAVEMODE__')) { Write-Output "DISCARDED $t" } }
   Start-Sleep -Milliseconds 400
 }
 `;
@@ -208,18 +233,21 @@ while ((Get-Date) -lt $deadline) {
 export interface AssertionDismisser {
   /** Stop watching and report how many assertion boxes were auto-ignored. */
   stop(): Promise<number>;
-  /** Texts of the "save changes?" dialogs answered No so far. */
+  /** Texts of the "save changes?" dialogs answered so far (prefixed SAVED:/DISCARDED:). */
   discardedSaves(): string[];
 }
 
 /**
- * @param discardSavePrompts also answer No to the Workbench "save changes?" box. Only safe when
- *   the caller saves its own editor changes (wb_save) and edits world files on disk directly.
+ * @param savePrompt how to answer the Workbench "save changes?" box: "save" (Yes), "discard" (No)
+ *   or "leave" (untouched).
  */
-export function startAssertionDismisser(durationMs: number, discardSavePrompts = false): AssertionDismisser {
+export function startAssertionDismisser(
+  durationMs: number,
+  savePrompt: "save" | "discard" | "leave" = "leave"
+): AssertionDismisser {
   const script = PS_DISMISS_LOOP.replace("__DURATION__", String(Math.ceil(durationMs))).replace(
-    "__DISCARD__",
-    discardSavePrompts ? "$true" : "$false"
+    /__SAVEMODE__/g,
+    savePrompt
   );
   const discarded: string[] = [];
   const encoded = Buffer.from(script, "utf16le").toString("base64");

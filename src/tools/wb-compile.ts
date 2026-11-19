@@ -76,13 +76,17 @@ export function registerWbCompile(server: McpServer): void {
             "Auto-click Ignore on the engine's 'Resources are leaking!' assertion box, which " +
               "otherwise blocks the reload until a human dismisses it. Set false to see it yourself."
           ),
+        savePrompt: z
+          .enum(["save", "discard", "leave"])
+          .default("save")
+          .describe(
+            "How to answer the Workbench 'save changes?' box that blocks the reload: 'save' (default, " +
+              "clicks Yes/Oui/Save/Enregistrer), 'discard' (No/Non/Don't save/Ne pas enregistrer), 'leave'."
+          ),
         discardSavePrompt: z
           .boolean()
-          .default(true)
-          .describe(
-            "Auto-answer No to the Workbench 'save changes?' box that blocks the reload. Editor " +
-              "changes made through the MCP must be saved with wb_save beforehand."
-          ),
+          .optional()
+          .describe("DEPRECATED alias: true = savePrompt 'discard', false = 'leave'. Overrides savePrompt when set."),
         trigger: z
           .enum(["auto", "netapi", "keyboard"])
           .default("auto")
@@ -94,7 +98,8 @@ export function registerWbCompile(server: McpServer): void {
           ),
       },
     },
-    async ({ timeoutMs, warningPathFilter, maxErrors, autoDismissAssertions, discardSavePrompt, trigger }) => {
+    async ({ timeoutMs, warningPathFilter, maxErrors, autoDismissAssertions, savePrompt, discardSavePrompt, trigger }) => {
+      const saveMode = discardSavePrompt === undefined ? savePrompt : discardSavePrompt ? "discard" : "leave";
       const fail = (text: string) => ({
         content: [{ type: "text" as const, text }],
         isError: true,
@@ -124,8 +129,8 @@ export function registerWbCompile(server: McpServer): void {
       }
 
       // Start watching before the keystroke: the assertion can fire early in teardown.
-      const dismisser = autoDismissAssertions || discardSavePrompt
-        ? startAssertionDismisser(timeoutMs + 10_000, discardSavePrompt)
+      const dismisser = autoDismissAssertions || saveMode !== "leave"
+        ? startAssertionDismisser(timeoutMs + 10_000, saveMode)
         : null;
       const stopDismisser = async (): Promise<number> => (dismisser ? dismisser.stop() : 0);
 
