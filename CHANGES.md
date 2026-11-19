@@ -1,4 +1,4 @@
-# Local changes (steffenbk fork, patched on this machine)
+# Changes in this fork (on top of steffenbk/enfusion-mcp-BK)
 
 ## 2026-11-19 — unattended Workbench dialogs
 - `wb_compile`: `discardSavePrompt` (bool) replaced by `savePrompt: "save" | "discard" | "leave"` (default **save**).
