@@ -2,7 +2,8 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { existsSync, mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { resolve, join, extname, relative } from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
+import { homedir } from "node:os";
 import type { Config } from "../config.js";
 import { generateGproj } from "../templates/gproj.js";
 import { generateScript } from "../templates/script.js";
@@ -17,52 +18,123 @@ import { findWorkbenchExe } from "../utils/game-paths.js";
 
 const BUILD_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 
-function runBuild(
+// ─── local patch (Benji): log-watched build ───────────────────────────────────
+// The Diag exe does NOT self-terminate after a -buildData launch, so we watch the
+// new logs_<ts>\console.log for completion / script errors / dep errors and kill it.
+const POLL_INTERVAL_MS = 1500;
+const LOGS_DIR = join(homedir(), "Documents", "My Games", "ArmaReforgerWorkbench", "logs");
+
+interface BuildWatchResult {
+  status: "success" | "compile_errors" | "dep_error" | "timeout" | "spawn_error" | "proc_error" | "exited";
+  message?: string;
+  dep?: string;
+  logDir: string | null;
+  errors: string[];
+  warnings: number;
+  elapsedMs: number;
+}
+
+function snapshotLogDirs(): Set<string> {
+  try {
+    if (!existsSync(LOGS_DIR)) return new Set();
+    return new Set(readdirSync(LOGS_DIR).filter((n) => n.startsWith("logs_")));
+  } catch {
+    return new Set();
+  }
+}
+
+function findNewLogDir(snapshot: Set<string>): string | null {
+  try {
+    if (!existsSync(LOGS_DIR)) return null;
+    let best: string | null = null;
+    let bestMs = 0;
+    for (const name of readdirSync(LOGS_DIR)) {
+      if (!name.startsWith("logs_") || snapshot.has(name)) continue;
+      const full = join(LOGS_DIR, name);
+      try {
+        const st = statSync(full);
+        if (st.isDirectory() && st.mtimeMs >= bestMs) { best = full; bestMs = st.mtimeMs; }
+      } catch { /* ignore */ }
+    }
+    return best;
+  } catch {
+    return null;
+  }
+}
+
+function readIfExists(path: string): string {
+  try { return existsSync(path) ? readFileSync(path, "utf-8") : ""; } catch { return ""; }
+}
+
+function killTree(pid: number | undefined): void {
+  if (!pid) return;
+  try { execSync(`taskkill /PID ${pid} /T /F`, { stdio: "ignore" }); } catch { /* ignore */ }
+}
+
+function extractScriptErrors(consoleLog: string): string[] {
+  const errors: string[] = [];
+  for (const line of consoleLog.split("\n")) {
+    if (/SCRIPT\s+\(E\)/.test(line) || /\(E\):.*\.c[,:"]/.test(line)) errors.push(line.trim());
+  }
+  return errors;
+}
+
+function runBuildWatched(
   exePath: string,
   args: string[],
+  cwd: string | undefined,
   timeoutMs: number
-): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut: boolean }> {
-  return new Promise((resolve) => {
-    let stdout = "";
-    let stderr = "";
-    let timedOut = false;
-
-    const proc = spawn(exePath, args, {
-      windowsHide: true,
-    });
-
-    const timer = setTimeout(() => {
-      timedOut = true;
-      proc.kill("SIGTERM");
-    }, timeoutMs);
-
-    proc.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-
-    proc.stderr.on("data", (data) => {
-      stderr += data.toString();
-    });
-
-    proc.on("close", (code) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: code ?? 1,
-        stdout,
-        stderr,
-        timedOut,
-      });
-    });
-
-    proc.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({
-        exitCode: 1,
-        stdout,
-        stderr: stderr + `\nProcess error: ${err.message}`,
-        timedOut: false,
-      });
-    });
+): Promise<BuildWatchResult> {
+  return new Promise((resolvePromise) => {
+    const snapshot = snapshotLogDirs();
+    const startMs = Date.now();
+    let proc: ReturnType<typeof spawn>;
+    try {
+      proc = spawn(exePath, args, { windowsHide: true, cwd });
+    } catch (e) {
+      resolvePromise({ status: "spawn_error", message: e instanceof Error ? e.message : String(e), logDir: null, errors: [], warnings: 0, elapsedMs: 0 });
+      return;
+    }
+    let settled = false;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const finish = (result: Omit<BuildWatchResult, "elapsedMs">) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearInterval(timer);
+      if (proc && proc.pid) killTree(proc.pid);
+      resolvePromise({ ...result, elapsedMs: Date.now() - startMs });
+    };
+    const evaluate = () => {
+      const logDir = findNewLogDir(snapshot);
+      if (!logDir) return;
+      const consoleLog = readIfExists(join(logDir, "console.log"));
+      const errorLog = readIfExists(join(logDir, "error.log"));
+      const combined = consoleLog + "\n" + errorLog;
+      const compiled = /Compiling Game scripts took/.test(consoleLog) || /Game successfully created/.test(consoleLog);
+      const depMatch = combined.match(/dependency '([0-9A-Fa-f]+)' can't be added/);
+      if (depMatch && !compiled) {
+        finish({ status: "dep_error", dep: depMatch[1], logDir, errors: [], warnings: 0 });
+        return;
+      }
+      if (compiled) {
+        const errors = extractScriptErrors(consoleLog);
+        const warnings = (consoleLog.match(/SCRIPT\s+\(W\)/g) || []).length;
+        finish({ status: errors.length ? "compile_errors" : "success", logDir, errors, warnings });
+      }
+    };
+    timer = setInterval(() => {
+      if (Date.now() - startMs > timeoutMs) {
+        finish({ status: "timeout", logDir: findNewLogDir(snapshot), errors: [], warnings: 0 });
+        return;
+      }
+      evaluate();
+    }, POLL_INTERVAL_MS);
+    proc.on("error", () => finish({ status: "proc_error", logDir: findNewLogDir(snapshot), errors: [], warnings: 0 }));
+    proc.on("close", () => setTimeout(() => {
+      if (settled) return;
+      evaluate();
+      if (!settled) finish({ status: "exited", logDir: findNewLogDir(snapshot), errors: [], warnings: 0 });
+    }, 600));
   });
 }
 
@@ -487,60 +559,59 @@ export function registerMod(
           args.push(`-gproj`, gprojPath);
         }
 
+        // local patch: resolve base game + Workshop deps
+        const workshopAddonsDir = join(homedir(), "Documents", "My Games", "ArmaReforger", "addons");
+        const extraAddonDirs = [join(config.gamePath, "addons"), workshopAddonsDir].filter((d) => existsSync(d));
+        if (extraAddonDirs.length) {
+          args.push(`-addonsDir`, extraAddonDirs.join(","));
+        }
+
         if (filterPath) {
           args.push(`-filterPath`, filterPath);
         }
 
         try {
-          const startTime = Date.now();
-          const result = await runBuild(exePath, args, BUILD_TIMEOUT_MS);
-          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-
+          // cwd = game install dir so the Workbench resolves base-game addon 58D0FB3206B6F859
+          const gameCwd = config.gamePath && existsSync(config.gamePath) ? config.gamePath : undefined;
+          const result = await runBuildWatched(exePath, args, gameCwd, BUILD_TIMEOUT_MS);
+          const elapsed = (result.elapsedMs / 1000).toFixed(1);
           const lines: string[] = [];
           lines.push(`## Build Result: ${addonName}`);
           lines.push("");
-
-          if (result.timedOut) {
-            lines.push(`**Status:** TIMEOUT (exceeded ${BUILD_TIMEOUT_MS / 1000}s limit)`);
-            lines.push("The build process was killed. Try building a smaller scope with filterPath.");
-          } else if (result.exitCode === 0) {
-            lines.push("**Status:** SUCCESS");
-            lines.push(`**Build time:** ${elapsed}s`);
-            lines.push(`**Output:** ${buildOutput}`);
-          } else {
-            lines.push(`**Status:** FAILED (exit code ${result.exitCode})`);
-            lines.push(`**Build time:** ${elapsed}s`);
+          switch (result.status) {
+            case "success":
+              lines.push(`**Status:** SUCCESS — scripts compiled (0 errors, ${result.warnings} warnings)`);
+              break;
+            case "compile_errors":
+              lines.push(`**Status:** FAILED — ${result.errors.length} script error(s)`);
+              break;
+            case "dep_error":
+              lines.push(`**Status:** FAILED — unresolved dependency ${result.dep}`);
+              lines.push(`The addon declares a dependency that could not be found in the game install or the Reforger Workshop addons dir.`);
+              break;
+            case "timeout":
+              lines.push(`**Status:** TIMEOUT — no compile-completion marker within ${BUILD_TIMEOUT_MS / 1000}s`);
+              break;
+            case "spawn_error":
+            case "proc_error":
+              lines.push(`**Status:** ERROR — could not start the Workbench process`);
+              if (result.message) lines.push(result.message);
+              break;
+            default:
+              lines.push(`**Status:** ${result.status.toUpperCase()}`);
           }
-
+          lines.push(`**Elapsed:** ${elapsed}s`);
+          if (result.logDir) lines.push(`**Log:** ${result.logDir}`);
           lines.push("");
           lines.push(`**Command:** ArmaReforgerWorkbenchSteamDiag.exe ${args.join(" ")}`);
-
-          if (result.stdout.trim()) {
+          if (result.errors.length) {
             lines.push("");
-            lines.push("### Output");
+            lines.push("### Script errors");
             lines.push("```");
-            const stdoutLines = result.stdout.trim().split("\n");
-            const shown = stdoutLines.slice(-100);
-            if (stdoutLines.length > 100) {
-              lines.push(`... (${stdoutLines.length - 100} lines omitted)`);
-            }
-            lines.push(shown.join("\n"));
+            lines.push(result.errors.slice(0, 50).join("\n"));
+            if (result.errors.length > 50) lines.push(`... (${result.errors.length - 50} more)`);
             lines.push("```");
           }
-
-          if (result.stderr.trim()) {
-            lines.push("");
-            lines.push("### Errors");
-            lines.push("```");
-            const stderrLines = result.stderr.trim().split("\n");
-            const shown = stderrLines.slice(-50);
-            if (stderrLines.length > 50) {
-              lines.push(`... (${stderrLines.length - 50} lines omitted)`);
-            }
-            lines.push(shown.join("\n"));
-            lines.push("```");
-          }
-
           return { content: [{ type: "text", text: lines.join("\n") }] };
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
@@ -602,6 +673,13 @@ export function registerMod(
 
         const addonDir = resolve(basePath, name);
         const classPrefix = prefix ?? derivePrefix(name);
+        // The prefix ends up in file names (Scripts/Game/<PREFIX>X.c): no separators or dots.
+        if (prefix !== undefined && !/^[A-Za-z0-9_]+$/.test(prefix)) {
+          return {
+            content: [{ type: "text", text: "Invalid prefix: letters, digits and underscores only." }],
+            isError: true,
+          };
+        }
 
         if (existsSync(addonDir)) {
           return {
