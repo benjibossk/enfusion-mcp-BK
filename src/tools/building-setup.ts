@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { randomBytes } from "node:crypto";
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { validateFilename } from "../utils/safe-path.js";
 import { resolve, join } from "node:path";
 import type { Config } from "../config.js";
 
@@ -181,6 +182,14 @@ export function registerBuildingSetup(server: McpServer, config: Config): void {
         manifest = ManifestSchema.parse(JSON.parse(rawManifest));
       } catch (err) {
         return { content: [{ type: "text" as const, text: `Invalid manifest: ${err}` }] };
+      }
+
+      // Manifest names become file and folder names: reject separators, "..", device names.
+      try {
+        validateFilename(manifest.building_name);
+        for (const part of manifest.parts) validateFilename(part.name);
+      } catch (err) {
+        return { content: [{ type: "text" as const, text: `Invalid manifest name: ${err instanceof Error ? err.message : err}` }] };
       }
 
       const outDir = outputDir

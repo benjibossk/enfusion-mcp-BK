@@ -1,8 +1,30 @@
 /**
- * EMCP_WB_Reload.c - Script and plugin reload handler
+ * EMCP_WB_Reload.c - Script reload handler
  *
- * Triggers script compilation via ScriptEditor module.
+ * Triggers the Script Editor's Build menu actions (exact labels confirmed from
+ * the Arma Reforger Script Editor):
+ *   - "Validate Scripts"            (F7)             — validate only, fast
+ *   - "Validate and Reload Scripts" (Shift+F7)       — validate + hot-reload (~15s)
+ *   - "Reload Scripts"              (Ctrl+Shift+F7)  — reload only
  * Called via NET API TCP protocol: APIFunc = "EMCP_WB_Reload"
+ *
+ * target: "validate" -> Validate Scripts ; anything else -> Validate and Reload Scripts.
+ *
+ * KEEP THIS VERSION. Upstream v0.12.0 ships a different Reload.c that *guesses* the
+ * menu path ("Script > Compile", then "Build > Compile All"), neither of which exists
+ * in this Script Editor. Ours uses the confirmed labels. If you ever re-copy the
+ * handlers from enfusion-mcp-BK-src/mod/, this file WILL be overwritten - restore it.
+ *
+ * This handler is also what makes headless compiling possible: wb_compile's
+ * trigger "netapi" calls it instead of synthesising Shift+F7, so a build can run with
+ * the Windows session LOCKED (SetForegroundWindow is refused then, so the keyboard
+ * path cannot work at all). See src/utils/wb-trigger.ts.
+ *
+ * NOTE: driving the reload from inside the script VM leaves the structs below alive
+ * when that VM is torn down, which the engine reports as leaked script instances —
+ * expected, not a defect. It also means the TCP reply usually never arrives: callers
+ * must treat that timeout as success and read the verdict from the console log and
+ * the Errors pane.
  */
 
 class EMCP_WB_ReloadRequest : JsonApiStruct
@@ -39,92 +61,23 @@ class EMCP_WB_Reload : NetApiHandler
 		EMCP_WB_ReloadRequest req = EMCP_WB_ReloadRequest.Cast(request);
 		EMCP_WB_ReloadResponse resp = new EMCP_WB_ReloadResponse();
 
-		string target = req.target;
-		if (target == "")
-			target = "scripts";
-
-		array<string> results = {};
-
-		if (target == "scripts" || target == "both")
+		ScriptEditor scriptEditor = Workbench.GetModule(ScriptEditor);
+		if (!scriptEditor)
 		{
-			ScriptEditor scriptEditor = Workbench.GetModule(ScriptEditor);
-			if (scriptEditor)
-			{
-				// Try known menu paths for script compilation in ScriptEditor
-				array<string> menuPath = {};
-				bool compiled = false;
-
-				// Try "Script, Compile" first
-				menuPath.Insert("Script");
-				menuPath.Insert("Compile");
-				compiled = scriptEditor.ExecuteAction(menuPath);
-
-				if (!compiled)
-				{
-					// Try "Build, Compile All"
-					menuPath.Clear();
-					menuPath.Insert("Build");
-					menuPath.Insert("Compile All");
-					compiled = scriptEditor.ExecuteAction(menuPath);
-				}
-
-				if (!compiled)
-				{
-					// Try "Script, Compile All"
-					menuPath.Clear();
-					menuPath.Insert("Script");
-					menuPath.Insert("Compile All");
-					compiled = scriptEditor.ExecuteAction(menuPath);
-				}
-
-				if (!compiled)
-				{
-					// Try via WorldEditor as fallback
-					WorldEditor worldEditor = Workbench.GetModule(WorldEditor);
-					if (worldEditor)
-					{
-						menuPath.Clear();
-						menuPath.Insert("Plugins");
-						menuPath.Insert("Reload Scripts");
-						compiled = worldEditor.ExecuteAction(menuPath);
-					}
-				}
-
-				results.Insert("Scripts: compilation triggered (ExecuteAction=" + compiled.ToString() + ")");
-			}
-			else
-			{
-				results.Insert("Scripts: ScriptEditor module not available");
-			}
+			resp.status = "error";
+			resp.message = "ScriptEditor module not available";
+			return resp;
 		}
 
-		if (target == "plugins" || target == "both")
-		{
-			ResourceManager resMgr = Workbench.GetModule(ResourceManager);
-			if (resMgr)
-			{
-				array<string> menuPath = {};
-				menuPath.Insert("Plugins");
-				menuPath.Insert("Reload");
-				bool result = resMgr.ExecuteAction(menuPath);
-				results.Insert("Plugins: reload triggered (ExecuteAction=" + result.ToString() + ")");
-			}
-			else
-			{
-				results.Insert("Plugins: ResourceManager module not available");
-			}
-		}
+		string action = "Validate and Reload Scripts";
+		if (req.target == "validate")
+			action = "Validate Scripts";
+
+		array<string> menuPath = {"Build", action};
+		bool ok = scriptEditor.ExecuteAction(menuPath);
 
 		resp.status = "ok";
-		string msg = "";
-		for (int i = 0; i < results.Count(); i++)
-		{
-			if (i > 0)
-				msg = msg + " | ";
-			msg = msg + results[i];
-		}
-		resp.message = msg;
-
+		resp.message = "Build > " + action + " (ExecuteAction=" + ok.ToString() + ")";
 		return resp;
 	}
 }
