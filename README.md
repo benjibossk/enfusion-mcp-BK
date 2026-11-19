@@ -189,6 +189,24 @@ npm run build
 npm test         # 187 tests
 ```
 
+## Changes in this fork
+
+This is a fork of [steffenbk/enfusion-mcp-BK](https://github.com/steffenbk/enfusion-mcp-BK), itself based on the original [enfusion-mcp](https://www.npmjs.com/package/enfusion-mcp). All credit for the project goes to their authors; the MIT license below is kept unchanged.
+
+What changed:
+
+- **`mod_build`**: the build is spawned from the game folder with `-addonsDir "<game>/addons,<Documents>/My Games/ArmaReforger/addons"` so base game and Workshop dependencies resolve, and completion is detected by watching the new `console.log` (`runBuildWatched`) instead of waiting for the Diag exe to exit (it never self-quits).
+- **`wb_compile` / `wb_console`**: compile and get the verdict in one call. Triggers Build > Validate and Reload Scripts through the NET API (works with the Windows session locked) with a Shift+F7 keyboard fallback, then reads the Script Editor's Errors pane over UI Automation (a failed compile writes nothing to the logs).
+- **Workbench dialog handling**: a watcher auto-dismisses the `Resources are leaking!` assertion box, answers save / "modified by another program, reload?" prompts according to a `savePrompt` option, closes the CrashReporter window; new `wb_dismiss_dialogs` tool.
+- **Patched `mod/.../EMCP_WB_Reload.c`**: calls the real `Build > Validate and Reload Scripts` menu action (confirmed labels) instead of guessing a menu path.
+- **Standalone addon deletion guard**: the client no longer deletes a standalone `EnfusionMCP` addon folder on cleanup. Set `EMCP_ALLOW_STANDALONE_CLEANUP=1` to restore the upstream behaviour.
+- Hardening: values spliced into PowerShell scripts are re-validated; `building_setup` and `mod create` names are checked before being used as file names.
+
+Requirements and cautions:
+
+- `wb_compile`, the dialog watcher and the keyboard trigger are **Windows only**: they run `powershell.exe` with UI Automation (`UIAutomationClient`) and user32 calls.
+- The Workbench NET API listens on port **5775**. Keep it on localhost; do not expose it beyond the loopback interface (no firewall rule, no port forwarding): anyone reaching it can drive the Workbench.
+
 ## License
 
 MIT

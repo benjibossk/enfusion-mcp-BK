@@ -417,13 +417,12 @@ export class WorkbenchClient {
     const standaloneDir = join(fallbackBase, HANDLER_FOLDER);
     if (!existsSync(standaloneDir)) return;
 
-    // DISABLED on this machine. Upstream assumes handlers get injected into a
-    // real mod, so it deletes the standalone addon to avoid duplicate classes.
-    // Here the standalone addon IS the intended setup: a permanent dev addon
-    // (GUID 5E9C00DEBEEF0001) kept enabled in the Workbench so the EMCP_WB_*
-    // handlers compile for every project; it is never a dependency of a
-    // published mod. Deleting it destroys hand-written files (our patched
-    // EMCP_WB_Reload.c) and the .gproj — which already happened once.
+    // Disabled by default. Upstream assumes handlers get injected into a real
+    // mod, so it deletes the standalone addon to avoid duplicate classes. But a
+    // standalone EnfusionMCP addon can be a deliberate setup: a permanent dev
+    // addon kept enabled in the Workbench so the EMCP_WB_* handlers compile for
+    // every project. Deleting it silently destroys hand-written files (e.g. a
+    // patched EMCP_WB_Reload.c) and the .gproj.
     // Set EMCP_ALLOW_STANDALONE_CLEANUP=1 to restore upstream behaviour.
     if (process.env.EMCP_ALLOW_STANDALONE_CLEANUP !== "1") {
       logger.info(

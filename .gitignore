@@ -9,3 +9,10 @@ enfusion-mcp.config.json
 .claude/
 nul
 .worktrees/
+
+# local working files
+logs/
+*.log
+BACKUP_*/
+*.bak
+scratchpad/
