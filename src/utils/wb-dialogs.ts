@@ -104,7 +104,12 @@ public class EmcpScan {
       bool isSave = (all.Contains("save") || all.Contains("enregistr") || all.Contains("sauvegard") || all.Contains("changes") || all.Contains("modif"))
                     && Find(labels, ids, SAVE) >= 0 && Find(labels, ids, DISCARD) >= 0;
       int ign = Find(labels, ids, IGNORE);
-      if (isSave) {
+      // "file changed outside the editor, reload?" (scripts edited by Claude): always reload, Benji 2026-11-19
+      bool isReload = (all.Contains("reload") || all.Contains("recharg") || all.Contains("changed outside") || all.Contains("modified outside") || all.Contains("modifié en dehors") || all.Contains("modifie en dehors"))
+                      && Find(labels, ids, SAVE) >= 0;
+      if (isReload) {
+        kind = "reload_prompt"; pick = Find(labels, ids, SAVE);
+      } else if (isSave) {
         kind = "save_prompt";
         if (mode == "save") pick = Find(labels, ids, SAVE);
         else if (mode == "discard") pick = Find(labels, ids, DISCARD);
